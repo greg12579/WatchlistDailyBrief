@@ -1,0 +1,44 @@
+# Watchlist Daily Brief Configuration
+
+# Watchlist source - path to Excel file with Bloomberg-style tickers
+watchlist_file: "01 Monitor_Ticker_List (January 2026).xlsx"
+
+# Trigger thresholds
+thresholds:
+  lookback_days: 30
+  vol_lookback_days: 20
+  price_move_z: 1.5
+  volume_multiple: 1.5
+  rel_move_vs_sector_z: 1.2
+  rel_move_vs_index_z: 1.5
+  max_items: 5
+  index_ticker: SPY
+
+# Delivery configuration
+delivery:
+  mode: email  # email or slack
+  email:
+    smtp_host: smtp.gmail.com
+    smtp_port: 587
+    from_addr: your-email@gmail.com
+    to_addrs:
+      - recipient@example.com
+  slack:
+    webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+# LLM configuration
+# provider: "anthropic", "openai", or "auto" (auto-detects based on which API key is set)
+# For Anthropic: set ANTHROPIC_API_KEY env var, use models like "claude-sonnet-4-20250514"
+# For OpenAI: set OPENAI_API_KEY env var, use models like "gpt-4o", "gpt-4o-mini"
+llm:
+  provider: auto  # anthropic, openai, or auto
+  model: "claude-sonnet-4-20250514"  # Change to "gpt-4o" if using OpenAI
+  temperature: 0.2
+
+# Storage configuration
+storage:
+  sqlite_path: "./watchbrief.sqlite"
+
+# Feedback server configuration
+feedback:
+  base_url: "http://localhost:8000"
