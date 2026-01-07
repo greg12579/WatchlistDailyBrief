@@ -22,7 +22,9 @@ delivery:
     smtp_port: 587
     from_addr: trades@nantahalapartners.com
     to_addrs:
-      - gregjessup@gmail.com
+      - greg@nantahalapartners.com
+    cc_addrs:
+      - greg@nantahalapartners.com
   slack:
     webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 

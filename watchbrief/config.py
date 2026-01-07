@@ -43,6 +43,7 @@ class EmailConfig:
     smtp_password: str = ""
     from_addr: str = ""
     to_addrs: list[str] = field(default_factory=list)
+    cc_addrs: list[str] = field(default_factory=list)
 
 
 @dataclass

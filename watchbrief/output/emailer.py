@@ -44,19 +44,27 @@ def send_email(
         msg["From"] = config.from_addr
         msg["To"] = ", ".join(config.to_addrs)
 
+        # Add CC if specified
+        if config.cc_addrs:
+            msg["Cc"] = ", ".join(config.cc_addrs)
+
         # Attach both versions (text first, then HTML)
         part1 = MIMEText(text_body, "plain")
         part2 = MIMEText(html_body, "html")
         msg.attach(part1)
         msg.attach(part2)
 
+        # Build recipient list (To + CC)
+        all_recipients = config.to_addrs + (config.cc_addrs or [])
+
         # Connect and send
         with smtplib.SMTP(config.smtp_host, config.smtp_port) as server:
             server.starttls()
             server.login(smtp_user, smtp_password)
-            server.sendmail(config.from_addr, config.to_addrs, msg.as_string())
+            server.sendmail(config.from_addr, all_recipients, msg.as_string())
 
-        print(f"Email sent to {', '.join(config.to_addrs)}")
+        cc_str = f" (cc: {', '.join(config.cc_addrs)})" if config.cc_addrs else ""
+        print(f"Email sent to {', '.join(config.to_addrs)}{cc_str}")
         return True
 
     except smtplib.SMTPException as e:

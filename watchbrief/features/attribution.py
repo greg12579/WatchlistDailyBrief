@@ -36,6 +36,17 @@ class CatalystCheckStatus(str, Enum):
     ERROR = "error"
 
 
+class CoverageTier(str, Enum):
+    """Coverage tier based on what data sources were successfully checked.
+
+    This determines the maximum confidence level the LLM can assign.
+    """
+
+    FULL = "Full"  # News + SEC checked -> High confidence allowed
+    PARTIAL = "Partial"  # Some but not all checked -> Medium max
+    NONE = "None"  # Nothing checked -> Low max
+
+
 @dataclass
 class PeerContext:
     """Performance context for a peer stock."""
@@ -75,6 +86,7 @@ class CatalystChecks:
             "earnings_calendar": self.earnings_calendar.value,
             "news_feed": self.news_feed.value,
             "sec_filings": self.sec_filings.value,
+            "coverage": self.coverage.value,
         }
 
     def missing_checks(self) -> list[str]:
@@ -85,6 +97,24 @@ class CatalystChecks:
         if self.sec_filings != CatalystCheckStatus.CHECKED:
             missing.append("sec_filings")
         return missing
+
+    @property
+    def coverage(self) -> CoverageTier:
+        """Compute coverage tier based on what was checked.
+
+        Full: news AND sec checked
+        Partial: at least one of news/sec checked
+        None: neither news nor sec checked
+        """
+        news_ok = self.news_feed == CatalystCheckStatus.CHECKED
+        sec_ok = self.sec_filings == CatalystCheckStatus.CHECKED
+
+        if news_ok and sec_ok:
+            return CoverageTier.FULL
+        elif news_ok or sec_ok:
+            return CoverageTier.PARTIAL
+        else:
+            return CoverageTier.NONE
 
 
 @dataclass
@@ -406,4 +436,63 @@ def build_attribution_context(
         catalyst_checks=catalyst_checks,
         attribution_hints=hints,
         news_evidence=news_evidence,
+    )
+
+
+def has_company_catalyst(context: AttributionContext) -> bool:
+    """Determine if context contains a verified company-specific catalyst.
+
+    A company catalyst is evidence of a company-specific event that could
+    explain the price move: earnings, SEC filing, significant news headline.
+
+    Args:
+        context: The attribution context with evidence
+
+    Returns:
+        True if a company-specific catalyst was detected
+    """
+    # Check attribution hints for company category with sufficient strength
+    if context.attribution_hints:
+        for hint in context.attribution_hints:
+            if hint.category == AttributionCategory.COMPANY and hint.strength >= 0.5:
+                return True
+
+    # Check processed news evidence
+    if context.news_evidence and context.news_evidence.checked:
+        if not context.news_evidence.no_company_specific_catalyst_found:
+            return True
+
+    # Check for specific event types that count as catalysts
+    if context.events:
+        for event in context.events:
+            if event.type in ("earnings", "sec_filing"):
+                return True
+
+    return False
+
+
+def recompute_actionability_label(context: AttributionContext) -> str:
+    """Recompute actionability label with company catalyst information.
+
+    This should be called after building the attribution context, since
+    catalyst detection happens during the evidence pipeline.
+
+    Args:
+        context: The attribution context with evidence
+
+    Returns:
+        Updated label: "ACTIONABLE", "MONITOR", or "IGNORE"
+    """
+    from watchbrief.features.triggers import compute_actionability_label
+
+    result = context.trigger_result
+    catalyst = has_company_catalyst(context)
+
+    return compute_actionability_label(
+        price_z=result.price_z,
+        volume_multiple=result.volume_multiple,
+        rel_vs_spy_z=result.rel_vs_spy_z,
+        rel_vs_sector_z=result.rel_vs_sector_z,
+        triggered=result.triggered,
+        has_company_catalyst=catalyst,
     )

@@ -60,6 +60,26 @@ def get_ohlcv(
         return None
 
 
+@lru_cache(maxsize=500)
+def get_company_name(ticker: str) -> str:
+    """Get the full company name for a ticker.
+
+    Args:
+        ticker: yfinance-compatible ticker symbol
+
+    Returns:
+        Company name, or the ticker itself if unavailable
+    """
+    try:
+        yf_ticker = yf.Ticker(ticker)
+        info = yf_ticker.info
+        # Try different fields that might contain the name
+        name = info.get("longName") or info.get("shortName") or ticker
+        return name
+    except Exception:
+        return ticker
+
+
 def compute_returns(df: pd.DataFrame) -> pd.Series:
     """Compute daily returns from close prices.
 
@@ -146,3 +166,39 @@ def get_ohlcv_cached(
 def clear_cache():
     """Clear the global market data cache."""
     _cache.clear()
+
+
+def get_extended_ohlcv(
+    ticker: str,
+    reference_date: date,
+    lookback_days: int = 260,
+) -> Optional[pd.DataFrame]:
+    """Fetch extended OHLCV data for trend context analysis.
+
+    This function fetches ~1 year of data (260 trading days) to support
+    52-week high/low calculations and multi-horizon return analysis.
+
+    Args:
+        ticker: yfinance-compatible ticker symbol
+        reference_date: The date to analyze (most recent date in range)
+        lookback_days: Number of trading days to look back (default 260 for ~1 year)
+
+    Returns:
+        DataFrame with OHLCV data and 'return' column, or None if unavailable.
+    """
+    # Add buffer for weekends/holidays (roughly 1.5x for calendar days)
+    buffer_days = int(lookback_days * 1.5) + 20
+    start_date = reference_date - timedelta(days=buffer_days)
+
+    df = get_ohlcv(ticker, start_date, reference_date)
+
+    if df is None or len(df) < 21:  # Minimum for basic metrics
+        return None
+
+    # Compute returns
+    df["return"] = compute_returns(df)
+
+    # Filter to only include data up to reference_date
+    df = df[df.index <= reference_date]
+
+    return df

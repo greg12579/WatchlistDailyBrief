@@ -179,16 +179,36 @@ class TestActionabilityLabel:
         )
         assert label == "ACTIONABLE"
 
-    def test_actionable_on_high_volume(self):
-        """Test ACTIONABLE label with high volume only."""
+    def test_actionable_on_high_volume_with_big_move(self):
+        """Test ACTIONABLE label with high volume AND big price move.
+
+        Under tightened rules, volume alone is not enough for ACTIONABLE.
+        Need either:
+        - Path A: price_z >= 2.0 AND volume >= 2.0
+        - Path B: has_company_catalyst AND notable move
+        """
         label = compute_actionability_label(
-            price_z=1.0,
-            volume_multiple=2.5,
+            price_z=2.0,  # Big move (threshold)
+            volume_multiple=2.5,  # High volume (confirmation)
             rel_vs_spy_z=0.5,
             rel_vs_sector_z=None,
             triggered=True,
         )
         assert label == "ACTIONABLE"
+
+    def test_monitor_on_high_volume_without_big_move(self):
+        """Test MONITOR label with high volume but small price move.
+
+        Under tightened rules, volume alone is not enough for ACTIONABLE.
+        """
+        label = compute_actionability_label(
+            price_z=1.0,  # Not big enough (< 2.0)
+            volume_multiple=2.5,  # High volume, but no confirmation
+            rel_vs_spy_z=0.5,
+            rel_vs_sector_z=None,
+            triggered=True,
+        )
+        assert label == "MONITOR"
 
     def test_monitor_on_moderate_signals(self):
         """Test MONITOR label with moderate signals."""

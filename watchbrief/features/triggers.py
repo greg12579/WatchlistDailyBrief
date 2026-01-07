@@ -205,27 +205,45 @@ def compute_actionability_label(
     rel_vs_spy_z: float,
     rel_vs_sector_z: Optional[float],
     triggered: bool,
+    has_company_catalyst: bool = False,
 ) -> str:
     """Compute the actionability label based on trigger values.
 
-    Rules (from BuildPlan):
-    - ACTIONABLE if (abs(price_z) >= 2.0 AND (abs(rel_vs_spy_z) >= 1.5 OR abs(rel_vs_sector_z) >= 1.5))
-                 OR volume_multiple >= 2.0
-    - MONITOR if triggered but not actionable
-    - IGNORE if not triggered
+    ACTIONABLE means "worth immediate attention" - not just a large move.
+
+    Rules (tightened to reduce dilution):
+
+    Path A: Big move + confirmation
+    - abs(price_z) >= 2.0
+    - AND at least one corroborating condition:
+      - abs(rel_vs_spy_z) >= 1.5 OR abs(rel_vs_sector_z) >= 1.5
+      - OR volume_multiple >= 2.0
+
+    Path B: Verified company catalyst
+    - Company-specific catalyst detected (earnings, SEC filing, significant news)
+    - AND move is at least notable (abs(price_z) >= 1.5 or volume_multiple >= 1.5)
+
+    MONITOR: Triggered but not actionable
+    IGNORE: Not triggered
 
     This is deterministic - LLM must not override it.
     """
     if not triggered:
         return "IGNORE"
 
-    # Check actionable conditions
+    # Path A: Big move + confirmation
     price_condition = abs(price_z) >= 2.0
     rel_spy_condition = abs(rel_vs_spy_z) >= 1.5
     rel_sector_condition = rel_vs_sector_z is not None and abs(rel_vs_sector_z) >= 1.5
     volume_condition = volume_multiple >= 2.0
 
-    if (price_condition and (rel_spy_condition or rel_sector_condition)) or volume_condition:
+    path_a = price_condition and (rel_spy_condition or rel_sector_condition or volume_condition)
+
+    # Path B: Verified company catalyst with notable move
+    notable_move = abs(price_z) >= 1.5 or volume_multiple >= 1.5
+    path_b = has_company_catalyst and notable_move
+
+    if path_a or path_b:
         return "ACTIONABLE"
 
     return "MONITOR"

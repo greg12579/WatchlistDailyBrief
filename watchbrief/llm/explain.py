@@ -6,10 +6,35 @@ from typing import Optional
 
 from watchbrief.config import LLMConfig
 from watchbrief.data.events import Event
-from watchbrief.features.attribution import AttributionContext, AttributionCategory
+from watchbrief.features.attribution import AttributionContext, AttributionCategory, CoverageTier
 from watchbrief.features.triggers import TriggerResult
 from watchbrief.llm.client import LLMClient, create_llm_client
 from watchbrief.llm.prompt import build_prompt, build_prompt_v2, get_system_prompt
+
+
+def cap_confidence_by_coverage(confidence: str, coverage: CoverageTier) -> str:
+    """Cap confidence level based on coverage tier.
+
+    Rules:
+    - Full coverage: High/Medium/Low allowed
+    - Partial coverage: Medium/Low allowed (High -> Medium)
+    - None coverage: Low only (High/Medium -> Low)
+
+    Args:
+        confidence: The raw confidence from LLM ("High", "Medium", "Low")
+        coverage: The coverage tier from CatalystChecks
+
+    Returns:
+        Capped confidence level
+    """
+    if coverage == CoverageTier.FULL:
+        return confidence  # No cap
+    elif coverage == CoverageTier.PARTIAL:
+        if confidence == "High":
+            return "Medium"
+        return confidence
+    else:  # CoverageTier.NONE
+        return "Low"
 
 
 @dataclass
@@ -212,6 +237,11 @@ def create_fallback_explanation(
     else:
         confidence = "Low"
 
+    # Gate confidence by coverage if context available
+    if context:
+        coverage = context.catalyst_checks.coverage
+        confidence = cap_confidence_by_coverage(confidence, coverage)
+
     # Generic why it matters
     direction = "gains" if result.pct_change_1d > 0 else "losses"
     why = f"{result.ticker} showing {result.label.lower()} signals with {abs(result.pct_change_1d):.1f}% {direction}; warrants attention."
@@ -285,6 +315,7 @@ def get_explanation_v2(
     1. Try LLM call with enhanced prompt
     2. If invalid JSON, retry
     3. If still invalid, use template fallback with attribution hints
+    4. Apply confidence cap based on coverage tier
 
     Args:
         context: Full attribution context
@@ -296,11 +327,24 @@ def get_explanation_v2(
     prompt = build_prompt_v2(context)
     system = get_system_prompt()
 
+    # Get coverage tier for confidence gating
+    coverage = context.catalyst_checks.coverage
+
     # First attempt
     try:
         response = client.complete(prompt, system=system)
         explanation = parse_explanation_json(response)
         if explanation:
+            # Gate confidence by coverage
+            capped_confidence = cap_confidence_by_coverage(explanation.confidence, coverage)
+            if capped_confidence != explanation.confidence:
+                explanation = Explanation(
+                    drivers=explanation.drivers,
+                    confidence=capped_confidence,
+                    why_it_matters=explanation.why_it_matters,
+                    is_fallback=explanation.is_fallback,
+                    missing_checks=explanation.missing_checks,
+                )
             return explanation
     except Exception as e:
         print(f"LLM error for {context.ticker}: {e}")
@@ -314,6 +358,16 @@ IMPORTANT: Your previous response was not valid JSON. Please respond with ONLY t
         response = client.complete(retry_prompt, system=system)
         explanation = parse_explanation_json(response)
         if explanation:
+            # Gate confidence by coverage
+            capped_confidence = cap_confidence_by_coverage(explanation.confidence, coverage)
+            if capped_confidence != explanation.confidence:
+                explanation = Explanation(
+                    drivers=explanation.drivers,
+                    confidence=capped_confidence,
+                    why_it_matters=explanation.why_it_matters,
+                    is_fallback=explanation.is_fallback,
+                    missing_checks=explanation.missing_checks,
+                )
             return explanation
     except Exception as e:
         print(f"LLM retry error for {context.ticker}: {e}")

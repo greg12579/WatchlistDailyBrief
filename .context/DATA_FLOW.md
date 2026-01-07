@@ -190,6 +190,21 @@ class Explanation:
     missing_checks: list[str]
 ```
 
+### TrendContext (Phase 2)
+```python
+@dataclass
+class TrendContext:
+    ticker: str
+    returns: TrendReturns      # pct_1d, pct_5d, pct_21d, pct_63d, pct_126d, pct_252d
+    z: TrendZScores            # z_5d, z_21d, z_63d, z_126d, z_252d
+    relative: RelativeMetrics  # vs_spy_z_63d, vs_spy_z_252d, vs_sector_z_*
+    extremes: ExtremeMetrics   # pct_from_52w_high/low, days_since_*
+    market_state: MarketState  # Enum: BREAKOUT_UP, RANGE_BOUND_MID, etc.
+    market_state_rationale: str
+    vol_20d_annualized: Optional[float]
+    vol_regime: Optional[str]  # "low", "normal", "elevated", "extreme"
+```
+
 ### BriefItem
 ```python
 @dataclass
@@ -201,6 +216,8 @@ class BriefItem:
     explanation: Explanation
     events: list[Event]
     news_evidence: Optional[NewsEvidence]
+    trend_context: Optional[TrendContext]    # Phase 2
+    phase2_response: Optional[Phase2Response] # Phase 2 LLM output
 ```
 
 ---

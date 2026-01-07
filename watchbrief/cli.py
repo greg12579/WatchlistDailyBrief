@@ -1,8 +1,9 @@
 """CLI entrypoint for Watchlist Daily Brief."""
 
 import argparse
+from dataclasses import replace
 import json
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, UTC
 from pathlib import Path
 from typing import Optional
 
@@ -16,13 +17,16 @@ from watchbrief.data.events import get_events_with_news, get_processed_news_evid
 from watchbrief.data.market_data import (
     compute_returns,
     get_ohlcv,
+    get_extended_ohlcv,
     clear_cache,
 )
-from watchbrief.features.attribution import build_attribution_context
-from watchbrief.features.ranking import rank_and_select
+from watchbrief.features.attribution import build_attribution_context, recompute_actionability_label
+from watchbrief.features.ranking import rank_and_select, rank_and_select_enhanced, EnhancedScore
 from watchbrief.features.triggers import compute_triggers
+from watchbrief.features.trend_context import compute_trend_context
 from watchbrief.llm.client import create_llm_client
 from watchbrief.llm.explain import explanation_to_dict, get_explanation_v2
+from watchbrief.llm.trend_prompt import get_phase2_context
 from watchbrief.output.emailer import send_email
 from watchbrief.output.renderer import BriefItem, render_email, render_slack
 from watchbrief.output.slack import send_slack
@@ -115,14 +119,16 @@ def run_daily(config: Config, target_date: date) -> None:
 
     print(f"Found {len(results)} triggered items (skipped {skipped} tickers)")
 
-    # Rank and select top items
-    ranked = rank_and_select(results, config.thresholds.max_items)
+    # Phase 1: Get candidate pool (larger than final selection)
+    # We fetch 2x max_items to allow evidence-aware re-ranking
+    candidate_pool_size = config.thresholds.max_items * 2
+    candidates = rank_and_select(results, candidate_pool_size)
 
-    if not ranked:
+    if not candidates:
         print("No items triggered. No brief to send.")
         return
 
-    print(f"Top {len(ranked)} items selected")
+    print(f"Selected {len(candidates)} candidates for evidence-aware ranking")
 
     # Create LLM client
     try:
@@ -132,30 +138,22 @@ def run_daily(config: Config, target_date: date) -> None:
         print("Using fallback explanations only")
         llm_client = None
 
-    # Generate explanations and build brief items
-    brief_items = []
-    for result, score, rank in ranked:
-        print(f"  Generating explanation for {result.ticker}...")
+    # Phase 2: Build attribution context for each candidate
+    # This enables evidence-aware scoring (catalysts, drift, etc.)
+    print("Building attribution context for candidates...")
+    candidate_contexts = []  # List of (result, context, explanation)
 
+    for result, base_score, _ in candidates:
         # Get events with news and SEC filings
         events, news_checked, sec_checked = get_events_with_news(
             result.ticker, start_date, target_date, lookback_days=7
         )
-        if events:
-            news_count = sum(1 for e in events if e.type == "news")
-            sec_count = sum(1 for e in events if e.type == "sec_filing")
-            earnings_count = sum(1 for e in events if e.type == "earnings")
-            print(f"    Found {len(events)} events ({earnings_count} earnings, {news_count} news, {sec_count} SEC)")
 
         # Get processed news evidence (clustering, classification, relevance scoring)
         trigger_time = datetime.combine(target_date, datetime.min.time())
         news_evidence = get_processed_news_evidence(
             result.ticker, trigger_time, lookback_hours=72
         )
-        if news_evidence.checked and news_evidence.top_clusters:
-            cluster_count = len(news_evidence.top_clusters)
-            catalyst_found = "yes" if not news_evidence.no_company_specific_catalyst_found else "no"
-            print(f"    News: {cluster_count} clusters, company catalyst: {catalyst_found}")
 
         # Get sector data for this ticker
         sector_etf = config.sector_map.get(result.ticker)
@@ -165,11 +163,9 @@ def run_daily(config: Config, target_date: date) -> None:
         peer_tickers = config.peer_map.get(result.ticker, [])
         peer_data = {}
         for peer in peer_tickers:
-            # Check if peer data was fetched, or if peer is in watchlist
             if peer in peer_dfs:
                 peer_data[peer] = peer_dfs[peer]
             elif peer in config.watchlist:
-                # Peer is in watchlist, fetch it
                 df = get_ohlcv(peer, start_date, target_date)
                 if df is not None:
                     df["return"] = compute_returns(df)
@@ -188,6 +184,52 @@ def run_daily(config: Config, target_date: date) -> None:
             news_evidence=news_evidence,
         )
 
+        # Recompute actionability label now that we have catalyst evidence
+        # (the initial label was computed without company catalyst info)
+        updated_label = recompute_actionability_label(attribution_context)
+        if updated_label != result.label:
+            result = replace(result, label=updated_label)
+            # Also update the trigger_result in context to stay in sync
+            attribution_context = replace(attribution_context, trigger_result=result)
+
+        candidate_contexts.append((result, attribution_context, None))  # explanation=None for now
+
+    # Phase 3: Re-rank using enhanced scoring with evidence
+    print("Re-ranking candidates with evidence-aware scoring...")
+    ranked_items = rank_and_select_enhanced(
+        candidate_contexts,
+        max_items=config.thresholds.max_items
+    )
+
+    print(f"Final {len(ranked_items)} items after evidence-aware ranking:")
+    for item in ranked_items:
+        es = item.enhanced_score
+        adj_str = ", ".join(es.adjustment_reasons) if es.adjustment_reasons else "none"
+        print(f"  {item.rank}. {item.result.ticker}: base={es.base_score:.1f}, adj=[{adj_str}], final={es.final_score:.1f}")
+
+    # Phase 4: Generate explanations for final ranked items
+    brief_items = []
+    for ranked_item in ranked_items:
+        result = ranked_item.result
+        attribution_context = ranked_item.context
+
+        print(f"  Generating explanation for {result.ticker}...")
+
+        # Retrieve events and news_evidence from context
+        events = attribution_context.events if attribution_context else []
+        news_evidence = attribution_context.news_evidence if attribution_context else None
+
+        if events:
+            news_count = sum(1 for e in events if e.type == "news")
+            sec_count = sum(1 for e in events if e.type == "sec_filing")
+            earnings_count = sum(1 for e in events if e.type == "earnings")
+            print(f"    Found {len(events)} events ({earnings_count} earnings, {news_count} news, {sec_count} SEC)")
+
+        if news_evidence and news_evidence.checked and news_evidence.top_clusters:
+            cluster_count = len(news_evidence.top_clusters)
+            catalyst_found = "yes" if not news_evidence.no_company_specific_catalyst_found else "no"
+            print(f"    News: {cluster_count} clusters, company catalyst: {catalyst_found}")
+
         # Get explanation with attribution context
         if llm_client:
             explanation = get_explanation_v2(attribution_context, llm_client)
@@ -195,20 +237,50 @@ def run_daily(config: Config, target_date: date) -> None:
             from watchbrief.llm.explain import create_fallback_explanation
             explanation = create_fallback_explanation(result, events, context=attribution_context)
 
+        # Phase 2: Compute trend context (separate from Phase 1 attribution)
+        print(f"    Computing trend context...")
+        extended_df = get_extended_ohlcv(result.ticker, target_date, lookback_days=260)
+        extended_spy_df = get_extended_ohlcv(config.thresholds.index_ticker, target_date, lookback_days=260)
+
+        trend_context = None
+        phase2_response = None
+        if extended_df is not None and extended_spy_df is not None:
+            # Get extended sector data if available
+            extended_sector_df = None
+            if sector_etf:
+                extended_sector_df = get_extended_ohlcv(sector_etf, target_date, lookback_days=260)
+
+            trend_context = compute_trend_context(
+                ticker=result.ticker,
+                df=extended_df,
+                spy_df=extended_spy_df,
+                sector_df=extended_sector_df,
+            )
+
+            if trend_context:
+                print(f"    Market state: [{trend_context.market_state.value.upper()}]")
+                # Get Phase 2 LLM response
+                phase2_response = get_phase2_context(trend_context, llm_client)
+        else:
+            print(f"    Trend context: insufficient historical data")
+
         brief_items.append(BriefItem(
             ticker=result.ticker,
-            rank=rank,
-            score=score,
+            rank=ranked_item.rank,
+            score=ranked_item.enhanced_score.final_score,
             result=result,
             explanation=explanation,
             events=events,  # Include news, SEC filings, earnings
             news_evidence=news_evidence,  # Processed news for transparency
+            trend_context=trend_context,  # Phase 2: trend context
+            phase2_response=phase2_response,  # Phase 2: LLM response
+            enhanced_score=ranked_item.enhanced_score,  # Score breakdown for transparency
         ))
 
     # Store in database
     with session_scope() as session:
         brief = Brief(
-            date_sent=datetime.utcnow(),
+            date_sent=datetime.now(UTC),
             subject=f"Watchlist Brief - {target_date}",
             delivery_mode=config.delivery.mode,
         )
@@ -390,6 +462,29 @@ def main():
         help="Path to config file",
     )
 
+    # clear-cache command
+    cache_parser = subparsers.add_parser("clear-cache", help="Clear the ticker data cache")
+    cache_parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file",
+    )
+
+    # reset-cooldown command
+    cooldown_parser = subparsers.add_parser("reset-cooldown", help="Reset cooldown by clearing brief history")
+    cooldown_parser.add_argument(
+        "--ticker",
+        type=str,
+        help="Specific ticker to reset (clears all if not specified)",
+    )
+    cooldown_parser.add_argument(
+        "--config",
+        type=str,
+        default="config.yaml",
+        help="Path to config file",
+    )
+
     args = parser.parse_args()
 
     # Load config
@@ -408,6 +503,25 @@ def main():
     elif args.command == "init-db":
         init_db(config.storage.sqlite_path)
         print(f"Database initialized at {config.storage.sqlite_path}")
+
+    elif args.command == "clear-cache":
+        clear_cache()
+        print("Ticker data cache cleared. Failed tickers will be retried on next run.")
+
+    elif args.command == "reset-cooldown":
+        from watchbrief.storage.models import Brief, BriefItem as DBBriefItem
+
+        init_db(config.storage.sqlite_path)
+
+        with session_scope() as session:
+            if args.ticker:
+                # Delete specific ticker's appearances
+                count = session.query(DBBriefItem).filter(DBBriefItem.ticker == args.ticker.upper()).delete()
+                print(f"Deleted {count} appearance(s) of {args.ticker.upper()} from brief history.")
+            else:
+                # Delete all briefs (cascades to items)
+                count = session.query(Brief).delete()
+                print(f"Deleted {count} brief(s) from history. All cooldowns reset.")
 
 
 if __name__ == "__main__":

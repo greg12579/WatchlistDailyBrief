@@ -151,7 +151,30 @@ Builds structured context for LLM explanation:
 - `why_it_matters`: PM-focused insight
 - `missing_checks`: Data sources not available
 
-### 5. Rendering (`output/renderer.py`)
+### 5. Phase 2: Trend Context (`features/trend_context.py`)
+
+**Purpose**: Provide global context for the move, separate from Phase 1 attribution.
+- Phase 1 explains "why" the stock moved (causes)
+- Phase 2 explains "where" this move sits historically (context)
+
+**Key Constraints**:
+- Quantitative-only input (no news/events)
+- No causality claims
+- No trading advice
+- Deterministic market state labels
+
+**Market State Taxonomy**:
+- `BREAKOUT_UP/DOWN`: New 52w high/low with high volume
+- `EXTENDED_RALLY/SELLOFF`: >2 std dev from mean
+- `RECOVERY_BOUNCE`: Up >15% from 52w low
+- `PULLBACK_FROM_HIGH`: Down >10% from 52w high
+- `RANGE_BOUND_HIGH/MID/LOW`: Position in 52w range
+- `TREND_CONTINUATION`: Strong trend, not at extreme
+- `VOLATILITY_SPIKE`: Current vol >2x average
+
+**Output**: `TrendContext` with multi-horizon returns, z-scores, relative metrics, 52-week positioning.
+
+### 6. Rendering (`output/renderer.py`)
 
 **Transparency Requirements**:
 - If news not checked: "News not checked (feed unavailable)"
@@ -159,6 +182,12 @@ Builds structured context for LLM explanation:
 - Show event type classification: `[FINANCING]`, `[MNA]`, `[EARNINGS]`
 - Show source and timestamp for each headline
 - Mark weak evidence: "(weak)"
+
+**Phase 2 Trend Context Section**:
+- Green accent (#e8f5e9) to differentiate from Phase 1
+- Shows market state label, 52-week positioning
+- Multi-horizon returns and z-scores
+- Relative performance vs SPY and sector
 
 **Formats**:
 - Email: HTML + plain text
