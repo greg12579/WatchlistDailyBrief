@@ -27,15 +27,16 @@ class LLMClient(ABC):
 class AnthropicClient(LLMClient):
     """Anthropic Claude client."""
 
-    def __init__(self, model: str, temperature: float):
+    def __init__(self, model: str, temperature: float, api_key: str = ""):
         try:
             import anthropic
         except ImportError:
             raise ImportError("anthropic package not installed. Run: pip install anthropic")
 
-        api_key = os.environ.get("ANTHROPIC_API_KEY")
+        # Use provided api_key or fall back to env var
+        api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         if not api_key:
-            raise ValueError("ANTHROPIC_API_KEY environment variable not set")
+            raise ValueError("ANTHROPIC_API_KEY not set in config or environment")
 
         self.client = anthropic.Anthropic(api_key=api_key)
         self.model = model
@@ -58,15 +59,16 @@ class AnthropicClient(LLMClient):
 class OpenAIClient(LLMClient):
     """OpenAI GPT client."""
 
-    def __init__(self, model: str, temperature: float):
+    def __init__(self, model: str, temperature: float, api_key: str = ""):
         try:
             import openai
         except ImportError:
             raise ImportError("openai package not installed. Run: pip install openai")
 
-        api_key = os.environ.get("OPENAI_API_KEY")
+        # Use provided api_key or fall back to env var
+        api_key = api_key or os.environ.get("OPENAI_API_KEY", "")
         if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable not set")
+            raise ValueError("OPENAI_API_KEY not set in config or environment")
 
         self.client = openai.OpenAI(api_key=api_key)
         self.model = model
@@ -113,8 +115,8 @@ def create_llm_client(config: LLMConfig) -> LLMClient:
             )
 
     if provider == "anthropic":
-        return AnthropicClient(config.model, config.temperature)
+        return AnthropicClient(config.model, config.temperature, config.api_key)
     elif provider == "openai":
-        return OpenAIClient(config.model, config.temperature)
+        return OpenAIClient(config.model, config.temperature, config.api_key)
     else:
         raise ValueError(f"Unknown LLM provider: {provider}")

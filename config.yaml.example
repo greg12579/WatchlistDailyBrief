@@ -42,3 +42,12 @@ storage:
 # Feedback server configuration
 feedback:
   base_url: "http://localhost:8000"
+
+# News API configuration (optional but recommended)
+# Set one of these environment variables for news fetching:
+# - POLYGON_API_KEY: Excellent stock news (https://polygon.io) - RECOMMENDED
+# - FINNHUB_API_KEY: Free tier 60 calls/min (https://finnhub.io)
+# - NEWSAPI_KEY: Free tier 100 requests/day (https://newsapi.org)
+#
+# Polygon.io is recommended for stock-specific news (used in priority order above).
+# Without a news API key, the system will report "news_feed: not_available"

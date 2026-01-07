@@ -39,6 +39,8 @@ class ThresholdsConfig:
 class EmailConfig:
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
     from_addr: str = ""
     to_addrs: list[str] = field(default_factory=list)
 
@@ -60,6 +62,7 @@ class LLMConfig:
     provider: str = "anthropic"
     model: str = "claude-sonnet-4-20250514"
     temperature: float = 0.2
+    api_key: str = ""  # Can be set here or via env var
 
 
 @dataclass
@@ -84,6 +87,7 @@ class Config:
     # Computed fields
     watchlist: list[str] = field(default_factory=list)
     sector_map: dict[str, str] = field(default_factory=dict)
+    peer_map: dict[str, list[str]] = field(default_factory=dict)
 
 
 def convert_bloomberg_ticker(bloomberg_ticker: str) -> Optional[str]:
@@ -171,6 +175,31 @@ def load_sector_map(filepath: str, base_dir: Path) -> dict[str, str]:
     return dict(zip(df["ticker"], df["sector_etf"]))
 
 
+def load_peer_map(filepath: str, base_dir: Path) -> dict[str, list[str]]:
+    """Load peer ticker mapping from CSV file.
+
+    Returns dict mapping ticker -> list of peer tickers.
+    """
+    csv_path = base_dir / filepath
+    if not csv_path.exists():
+        print(f"Peer map not found: {csv_path}, using empty mapping")
+        return {}
+
+    df = pd.read_csv(csv_path)
+    peer_map = {}
+
+    for _, row in df.iterrows():
+        ticker = row["ticker"]
+        peers = []
+        for col in ["peer1", "peer2", "peer3"]:
+            if col in row and pd.notna(row[col]):
+                peers.append(row[col])
+        if peers:
+            peer_map[ticker] = peers
+
+    return peer_map
+
+
 def load_config(config_path: str = "config.yaml") -> Config:
     """Load configuration from YAML file.
 
@@ -197,7 +226,15 @@ def load_config(config_path: str = "config.yaml") -> Config:
         slack=slack_config,
     )
 
-    llm = LLMConfig(**raw.get("llm", {}))
+    llm_raw = raw.get("llm", {})
+    # Handle OPENAI_API_KEY or ANTHROPIC_API_KEY field names in config
+    api_key = llm_raw.pop("OPENAI_API_KEY", "") or llm_raw.pop("ANTHROPIC_API_KEY", "") or llm_raw.get("api_key", "")
+    llm = LLMConfig(
+        provider=llm_raw.get("provider", "anthropic"),
+        model=llm_raw.get("model", "claude-sonnet-4-20250514"),
+        temperature=llm_raw.get("temperature", 0.2),
+        api_key=api_key,
+    )
     storage = StorageConfig(**raw.get("storage", {}))
     feedback = FeedbackConfig(**raw.get("feedback", {}))
 
@@ -218,5 +255,10 @@ def load_config(config_path: str = "config.yaml") -> Config:
     sector_map_path = base_dir / "sector_map.csv"
     if sector_map_path.exists():
         config.sector_map = load_sector_map("sector_map.csv", base_dir)
+
+    # Load peer map if exists
+    peer_map_path = base_dir / "peer_map.csv"
+    if peer_map_path.exists():
+        config.peer_map = load_peer_map("peer_map.csv", base_dir)
 
     return config

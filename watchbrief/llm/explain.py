@@ -1,14 +1,15 @@
 """LLM explanation generation with validation and fallback."""
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from watchbrief.config import LLMConfig
 from watchbrief.data.events import Event
+from watchbrief.features.attribution import AttributionContext, AttributionCategory
 from watchbrief.features.triggers import TriggerResult
 from watchbrief.llm.client import LLMClient, create_llm_client
-from watchbrief.llm.prompt import build_prompt, get_system_prompt
+from watchbrief.llm.prompt import build_prompt, build_prompt_v2, get_system_prompt
 
 
 @dataclass
@@ -18,6 +19,8 @@ class Driver:
     rank: int
     text: str
     weight_pct: int
+    category: str = ""  # New: attribution category
+    evidence: list[str] = field(default_factory=list)  # New: supporting evidence
 
 
 @dataclass
@@ -28,11 +31,13 @@ class Explanation:
     confidence: str  # "Low" | "Medium" | "High"
     why_it_matters: str
     is_fallback: bool = False
+    missing_checks: list[str] = field(default_factory=list)  # New: data sources not checked
 
 
 def parse_explanation_json(response: str) -> Optional[Explanation]:
     """Parse LLM response JSON into Explanation object.
 
+    Handles both legacy and v2 formats.
     Returns None if parsing fails.
     """
     try:
@@ -54,6 +59,8 @@ def parse_explanation_json(response: str) -> Optional[Explanation]:
                 rank=d.get("rank", i + 1),
                 text=d.get("text", ""),
                 weight_pct=d.get("weight_pct", 0),
+                category=d.get("category", ""),  # New field
+                evidence=d.get("evidence", []),  # New field
             )
             for i, d in enumerate(data["drivers"])
         ]
@@ -63,100 +70,138 @@ def parse_explanation_json(response: str) -> Optional[Explanation]:
         if confidence not in ("Low", "Medium", "High"):
             confidence = "Low"
 
+        # Get missing_checks (new field, optional)
+        missing_checks = data.get("missing_checks", [])
+
         return Explanation(
             drivers=drivers,
             confidence=confidence,
             why_it_matters=data["why_it_matters"],
+            missing_checks=missing_checks,
         )
 
     except (json.JSONDecodeError, KeyError, TypeError):
         return None
 
 
-def create_fallback_explanation(result: TriggerResult, events: list[Event]) -> Explanation:
+def create_fallback_explanation(
+    result: TriggerResult,
+    events: list[Event],
+    context: Optional[AttributionContext] = None,
+) -> Explanation:
     """Create a template-based fallback explanation when LLM fails.
 
     Args:
         result: Trigger computation result
         events: List of events (may be empty)
+        context: Optional attribution context for enhanced fallback
 
     Returns:
         Fallback Explanation object
     """
     drivers = []
+    missing_checks = ["news_feed", "sec_filings"]  # Phase 1: always missing these
 
-    # Primary driver based on strongest trigger
-    if abs(result.price_z) >= 2.0:
-        direction = "up" if result.pct_change_1d > 0 else "down"
-        drivers.append(
-            Driver(
-                rank=1,
-                text=f"Significant price move {direction} ({result.pct_change_1d:+.1f}%) with z-score {result.price_z:.1f}",
-                weight_pct=50,
-            )
-        )
-    elif result.volume_multiple >= 2.0:
-        drivers.append(
-            Driver(
-                rank=1,
-                text=f"Unusual volume ({result.volume_multiple:.1f}x average)",
-                weight_pct=50,
-            )
-        )
-    else:
-        drivers.append(
-            Driver(
-                rank=1,
-                text="Price/volume deviation from recent patterns",
-                weight_pct=50,
-            )
-        )
-
-    # Secondary driver: relative performance
-    if abs(result.rel_vs_spy_z) >= 1.5:
-        direction = "outperformed" if result.rel_vs_spy_z > 0 else "underperformed"
-        drivers.append(
-            Driver(
-                rank=2,
-                text=f"Stock {direction} market (SPY) significantly",
-                weight_pct=30,
-            )
-        )
-    elif result.rel_vs_sector_z is not None and abs(result.rel_vs_sector_z) >= 1.2:
-        direction = "outperformed" if result.rel_vs_sector_z > 0 else "underperformed"
-        drivers.append(
-            Driver(
-                rank=2,
-                text=f"Stock {direction} sector ({result.sector_etf}) significantly",
-                weight_pct=30,
-            )
-        )
-    else:
-        remaining = 100 - sum(d.weight_pct for d in drivers)
-        drivers.append(
-            Driver(
-                rank=2,
-                text="Macro/sector factors or flow dynamics",
-                weight_pct=remaining,
-            )
-        )
-
-    # Add event driver if present
-    if events:
-        event_texts = [f"{e.type}: {e.title}" for e in events[:2]]
-        remaining = 100 - sum(d.weight_pct for d in drivers)
-        if remaining > 0:
+    # Use attribution hints if available
+    if context and context.attribution_hints:
+        for i, hint in enumerate(context.attribution_hints[:3]):
             drivers.append(
                 Driver(
-                    rank=len(drivers) + 1,
-                    text=f"Company event(s): {'; '.join(event_texts)}",
-                    weight_pct=remaining,
+                    rank=i + 1,
+                    text=f"{hint.category.value}: {'; '.join(hint.evidence[:2])}",
+                    weight_pct=int(hint.strength * 100 / sum(h.strength for h in context.attribution_hints[:3])),
+                    category=hint.category.value,
+                    evidence=hint.evidence,
+                )
+            )
+    else:
+        # Legacy fallback logic
+        # Primary driver based on strongest trigger
+        if abs(result.price_z) >= 2.0:
+            direction = "up" if result.pct_change_1d > 0 else "down"
+            drivers.append(
+                Driver(
+                    rank=1,
+                    text=f"Significant price move {direction} ({result.pct_change_1d:+.1f}%) with z-score {result.price_z:.1f}",
+                    weight_pct=50,
+                    category="Flow",
+                    evidence=[f"price_z={result.price_z:.1f}", f"pct_change_1d={result.pct_change_1d:+.1f}%"],
+                )
+            )
+        elif result.volume_multiple >= 2.0:
+            drivers.append(
+                Driver(
+                    rank=1,
+                    text=f"Unusual volume ({result.volume_multiple:.1f}x average)",
+                    weight_pct=50,
+                    category="Flow",
+                    evidence=[f"volume={result.volume_multiple:.1f}x"],
+                )
+            )
+        else:
+            drivers.append(
+                Driver(
+                    rank=1,
+                    text="Price/volume deviation from recent patterns",
+                    weight_pct=50,
+                    category="Unattributed",
+                    evidence=result.triggered_reasons,
                 )
             )
 
+        # Secondary driver: relative performance
+        if abs(result.rel_vs_spy_z) >= 1.5:
+            direction = "outperformed" if result.rel_vs_spy_z > 0 else "underperformed"
+            drivers.append(
+                Driver(
+                    rank=2,
+                    text=f"Stock {direction} market (SPY) significantly",
+                    weight_pct=30,
+                    category="Macro",
+                    evidence=[f"rel_vs_spy_z={result.rel_vs_spy_z:.1f}"],
+                )
+            )
+        elif result.rel_vs_sector_z is not None and abs(result.rel_vs_sector_z) >= 1.2:
+            direction = "outperformed" if result.rel_vs_sector_z > 0 else "underperformed"
+            drivers.append(
+                Driver(
+                    rank=2,
+                    text=f"Stock {direction} sector ({result.sector_etf}) significantly",
+                    weight_pct=30,
+                    category="Sector/Peer",
+                    evidence=[f"rel_vs_sector_z={result.rel_vs_sector_z:.1f}"],
+                )
+            )
+        else:
+            remaining = 100 - sum(d.weight_pct for d in drivers)
+            drivers.append(
+                Driver(
+                    rank=2,
+                    text="Macro/sector factors or flow dynamics",
+                    weight_pct=remaining,
+                    category="Unattributed",
+                    evidence=[],
+                )
+            )
+
+        # Add event driver if present
+        if events:
+            event_texts = [f"{e.type}: {e.title}" for e in events[:2]]
+            remaining = 100 - sum(d.weight_pct for d in drivers)
+            if remaining > 0:
+                drivers.append(
+                    Driver(
+                        rank=len(drivers) + 1,
+                        text=f"Company event(s): {'; '.join(event_texts)}",
+                        weight_pct=remaining,
+                        category="Company",
+                        evidence=[f"{e.type}: {e.title}" for e in events[:2]],
+                    )
+                )
+
     # Normalize weights to sum to 100
     total_weight = sum(d.weight_pct for d in drivers)
-    if total_weight != 100:
+    if total_weight != 100 and total_weight > 0:
         factor = 100 / total_weight
         for d in drivers:
             d.weight_pct = round(d.weight_pct * factor)
@@ -176,6 +221,7 @@ def create_fallback_explanation(result: TriggerResult, events: list[Event]) -> E
         confidence=confidence,
         why_it_matters=why,
         is_fallback=True,
+        missing_checks=missing_checks,
     )
 
 
@@ -184,7 +230,7 @@ def get_explanation(
     events: list[Event],
     client: LLMClient,
 ) -> Explanation:
-    """Get LLM explanation for a trigger result.
+    """Get LLM explanation for a trigger result (legacy).
 
     Implements retry logic and fallback:
     1. Try LLM call
@@ -229,14 +275,73 @@ IMPORTANT: Your previous response was not valid JSON. Please respond with ONLY t
     return create_fallback_explanation(result, events)
 
 
+def get_explanation_v2(
+    context: AttributionContext,
+    client: LLMClient,
+) -> Explanation:
+    """Get LLM explanation with full attribution context (v2).
+
+    Implements retry logic and fallback:
+    1. Try LLM call with enhanced prompt
+    2. If invalid JSON, retry
+    3. If still invalid, use template fallback with attribution hints
+
+    Args:
+        context: Full attribution context
+        client: LLM client to use
+
+    Returns:
+        Explanation object (either from LLM or fallback)
+    """
+    prompt = build_prompt_v2(context)
+    system = get_system_prompt()
+
+    # First attempt
+    try:
+        response = client.complete(prompt, system=system)
+        explanation = parse_explanation_json(response)
+        if explanation:
+            return explanation
+    except Exception as e:
+        print(f"LLM error for {context.ticker}: {e}")
+
+    # Retry with stricter instruction
+    retry_prompt = f"""{prompt}
+
+IMPORTANT: Your previous response was not valid JSON. Please respond with ONLY the JSON object, no other text."""
+
+    try:
+        response = client.complete(retry_prompt, system=system)
+        explanation = parse_explanation_json(response)
+        if explanation:
+            return explanation
+    except Exception as e:
+        print(f"LLM retry error for {context.ticker}: {e}")
+
+    # Fallback to template with attribution hints
+    print(f"Using fallback explanation for {context.ticker}")
+    return create_fallback_explanation(
+        context.trigger_result,
+        context.events,
+        context=context,
+    )
+
+
 def explanation_to_dict(exp: Explanation) -> dict:
     """Convert Explanation to dictionary for storage."""
     return {
         "drivers": [
-            {"rank": d.rank, "text": d.text, "weight_pct": d.weight_pct}
+            {
+                "rank": d.rank,
+                "text": d.text,
+                "weight_pct": d.weight_pct,
+                "category": d.category,
+                "evidence": d.evidence,
+            }
             for d in exp.drivers
         ],
         "confidence": exp.confidence,
         "why_it_matters": exp.why_it_matters,
         "is_fallback": exp.is_fallback,
+        "missing_checks": exp.missing_checks,
     }

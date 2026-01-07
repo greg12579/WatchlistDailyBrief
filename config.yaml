@@ -20,9 +20,9 @@ delivery:
   email:
     smtp_host: smtp.gmail.com
     smtp_port: 587
-    from_addr: your-email@gmail.com
+    from_addr: trades@nantahalapartners.com
     to_addrs:
-      - recipient@example.com
+      - gregjessup@gmail.com
   slack:
     webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
 
@@ -31,9 +31,9 @@ delivery:
 # For Anthropic: set ANTHROPIC_API_KEY env var, use models like "claude-sonnet-4-20250514"
 # For OpenAI: set OPENAI_API_KEY env var, use models like "gpt-4o", "gpt-4o-mini"
 llm:
-  provider: auto  # anthropic, openai, or auto
-  model: "gpt-4o"  # or "claude-sonnet-4-20250514" for Anthropic
-  temperature: 0.2
+  provider: openai  # anthropic, openai, or auto
+  model: "gpt-4o"  # Change to "gpt-4o" if using OpenAI
+  temperature: 0.2  
 
 # Storage configuration
 storage:
