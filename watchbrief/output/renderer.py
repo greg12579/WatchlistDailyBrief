@@ -11,6 +11,7 @@ from watchbrief.llm.explain import Explanation
 if TYPE_CHECKING:
     from watchbrief.data.news_processor import NewsEvidence
     from watchbrief.features.ranking import EnhancedScore
+    from watchbrief.features.scanners import TapeRow
     from watchbrief.features.trend_context import TrendContext
     from watchbrief.llm.trend_prompt import Phase2Response
 
@@ -67,6 +68,193 @@ def _color_zscore(value: float) -> str:
     return _color_value(value, "+.2f", "")
 
 
+def _color_pct_simple(value: float) -> str:
+    """Return HTML-formatted percentage with color coding (simpler format for tables)."""
+    color = "#28a745" if value >= 0 else "#dc3545"
+    return f'<span style="color:{color};">{value:+.1f}%</span>'
+
+
+# =============================================================================
+# Scanner Section Rendering (Phase 2.5)
+# =============================================================================
+
+
+def render_scan_sections(scan_results: dict) -> tuple[str, str]:
+    """
+    Render scanner tables as HTML and text.
+
+    Args:
+        scan_results: Dict with keys like "tape", "near_highs", "broken"
+
+    Returns:
+        Tuple of (html_str, text_str)
+    """
+    html_parts = []
+    text_parts = []
+
+    # Section 1: Daily Tape (Top 10 by absolute 1D return)
+    if "tape" in scan_results and scan_results["tape"]:
+        html_parts.append(_render_tape_section_html(scan_results["tape"]))
+        text_parts.append(_render_tape_section_text(scan_results["tape"]))
+
+    # Section 2: Near Highs
+    if "near_highs" in scan_results and scan_results["near_highs"]:
+        html_parts.append(_render_near_highs_html(scan_results["near_highs"]))
+        text_parts.append(_render_near_highs_text(scan_results["near_highs"]))
+
+    # Section 3: Trading Like Shit
+    if "broken" in scan_results and scan_results["broken"]:
+        html_parts.append(_render_broken_html(scan_results["broken"]))
+        text_parts.append(_render_broken_text(scan_results["broken"]))
+
+    return "\n".join(html_parts), "\n".join(text_parts)
+
+
+def _render_tape_section_html(rows: list["TapeRow"]) -> str:
+    """Render Daily Tape section (Top 10 by absolute 1D return)."""
+    html = []
+    html.append('<div class="scan-section" style="margin-bottom:20px;">')
+    html.append('<h2 style="font-size:1.1em;margin-bottom:10px;">Daily Tape (Top 10 Movers)</h2>')
+    html.append(_render_tape_table_html(rows))
+    html.append('</div>')
+    return "\n".join(html)
+
+
+def _render_tape_table_html(rows: list["TapeRow"]) -> str:
+    """Render a single tape table."""
+    html = []
+    html.append('<table style="width:100%;border-collapse:collapse;font-size:0.85em;">')
+
+    # Header
+    html.append('<tr style="background:#f8f9fa;border-bottom:2px solid #ddd;">')
+    html.append('<th style="text-align:left;padding:6px;">Ticker</th>')
+    html.append('<th style="text-align:right;padding:6px;">1D</th>')
+    html.append('<th style="text-align:right;padding:6px;">5D</th>')
+    html.append('<th style="text-align:right;padding:6px;">YTD</th>')
+    html.append('<th style="text-align:right;padding:6px;">vs IWM 1D</th>')
+    html.append('<th style="text-align:right;padding:6px;">vs IWM 5D</th>')
+    html.append('<th style="text-align:right;padding:6px;">vs IWM YTD</th>')
+    html.append('</tr>')
+
+    # Rows
+    for row in rows:
+        html.append('<tr style="border-bottom:1px solid #eee;">')
+        html.append(f'<td style="padding:6px;font-weight:600;">{row.ticker}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.ret_1d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.ret_5d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.ret_252d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;font-weight:600;">{_color_pct_simple(row.rel_vs_iwm_1d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.rel_vs_iwm_5d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.rel_vs_iwm_252d)}</td>')
+        html.append('</tr>')
+
+    html.append('</table>')
+    return "\n".join(html)
+
+
+def _render_tape_section_text(rows: list["TapeRow"]) -> str:
+    """Render Daily Tape section (text version)."""
+    lines = []
+    lines.append("\nDAILY TAPE (Top 10 Movers)")
+    lines.append("=" * 90)
+    lines.append(
+        f"{'Ticker':<8} {'1D':>8} {'5D':>8} {'YTD':>8} "
+        f"{'vs IWM 1D':>11} {'vs IWM 5D':>11} {'vs IWM YTD':>12}"
+    )
+    lines.append("-" * 90)
+    for row in rows:
+        lines.append(
+            f"{row.ticker:<8} {row.ret_1d:>+7.1f}% {row.ret_5d:>+7.1f}% {row.ret_252d:>+7.1f}% "
+            f"{row.rel_vs_iwm_1d:>+10.1f}% {row.rel_vs_iwm_5d:>+10.1f}% {row.rel_vs_iwm_252d:>+11.1f}%"
+        )
+
+    return "\n".join(lines)
+
+
+def _render_near_highs_html(rows: list["TapeRow"]) -> str:
+    """Render Near Highs (Watch) section."""
+    html = []
+    html.append('<div class="scan-section" style="margin-bottom:20px;">')
+    html.append('<h2 style="font-size:1.1em;margin-bottom:10px;">Near Highs (Watch)</h2>')
+    html.append('<table style="width:100%;border-collapse:collapse;font-size:0.85em;">')
+
+    # Header
+    html.append('<tr style="background:#f8f9fa;border-bottom:2px solid #ddd;">')
+    html.append('<th style="text-align:left;padding:6px;">Ticker</th>')
+    html.append('<th style="text-align:right;padding:6px;">% from 52w High</th>')
+    html.append('<th style="text-align:right;padding:6px;">252D</th>')
+    html.append('<th style="text-align:right;padding:6px;">vs IWM 252D</th>')
+    html.append('<th style="text-align:left;padding:6px;">State</th>')
+    html.append('</tr>')
+
+    for row in rows:
+        html.append('<tr style="border-bottom:1px solid #eee;">')
+        html.append(f'<td style="padding:6px;font-weight:600;">{row.ticker}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;color:#28a745;font-weight:600;">{row.pct_from_52w_high:+.1f}%</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.ret_252d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.rel_vs_iwm_252d)}</td>')
+        html.append(f'<td style="padding:6px;font-size:0.8em;">{row.state_label}</td>')
+        html.append('</tr>')
+
+    html.append('</table>')
+    html.append('</div>')
+    return "\n".join(html)
+
+
+def _render_near_highs_text(rows: list["TapeRow"]) -> str:
+    """Render Near Highs (Watch) section (text version)."""
+    lines = []
+    lines.append("\nNEAR HIGHS (Watch)")
+    lines.append("=" * 50)
+    lines.append(f"{'Ticker':<8} {'from High':>10} {'252D':>8} {'vs IWM':>8} {'State':<15}")
+    lines.append("-" * 55)
+    for row in rows:
+        lines.append(f"{row.ticker:<8} {row.pct_from_52w_high:>+9.1f}% {row.ret_252d:>+7.1f}% {row.rel_vs_iwm_252d:>+7.1f}% {row.state_label:<15}")
+    return "\n".join(lines)
+
+
+def _render_broken_html(rows: list["TapeRow"]) -> str:
+    """Render Trading Like Shit (Watch) section."""
+    html = []
+    html.append('<div class="scan-section" style="margin-bottom:20px;">')
+    html.append('<h2 style="font-size:1.1em;margin-bottom:10px;">Trading Like Shit (Watch)</h2>')
+    html.append('<table style="width:100%;border-collapse:collapse;font-size:0.85em;">')
+
+    # Header
+    html.append('<tr style="background:#f8f9fa;border-bottom:2px solid #ddd;">')
+    html.append('<th style="text-align:left;padding:6px;">Ticker</th>')
+    html.append('<th style="text-align:right;padding:6px;">% from 52w Low</th>')
+    html.append('<th style="text-align:right;padding:6px;">252D</th>')
+    html.append('<th style="text-align:right;padding:6px;">vs IWM 252D</th>')
+    html.append('<th style="text-align:left;padding:6px;">State</th>')
+    html.append('</tr>')
+
+    for row in rows:
+        html.append('<tr style="border-bottom:1px solid #eee;">')
+        html.append(f'<td style="padding:6px;font-weight:600;">{row.ticker}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;color:#dc3545;font-weight:600;">{row.pct_from_52w_low:+.1f}%</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.ret_252d)}</td>')
+        html.append(f'<td style="text-align:right;padding:6px;">{_color_pct_simple(row.rel_vs_iwm_252d)}</td>')
+        html.append(f'<td style="padding:6px;font-size:0.8em;">{row.state_label}</td>')
+        html.append('</tr>')
+
+    html.append('</table>')
+    html.append('</div>')
+    return "\n".join(html)
+
+
+def _render_broken_text(rows: list["TapeRow"]) -> str:
+    """Render Trading Like Shit (Watch) section (text version)."""
+    lines = []
+    lines.append("\nTRADING LIKE SHIT (Watch)")
+    lines.append("=" * 50)
+    lines.append(f"{'Ticker':<8} {'from Low':>10} {'252D':>8} {'vs IWM':>8} {'State':<15}")
+    lines.append("-" * 55)
+    for row in rows:
+        lines.append(f"{row.ticker:<8} {row.pct_from_52w_low:>+9.1f}% {row.ret_252d:>+7.1f}% {row.rel_vs_iwm_252d:>+7.1f}% {row.state_label:<15}")
+    return "\n".join(lines)
+
+
 @dataclass
 class BriefItem:
     """A rendered item for the brief."""
@@ -89,6 +277,7 @@ def render_email(
     items: list[BriefItem],
     base_url: str,
     brief_id: int,
+    scan_results: Optional[dict] = None,
 ) -> tuple[str, str, str]:
     """Render email brief with HTML and text versions.
 
@@ -97,6 +286,7 @@ def render_email(
         items: List of BriefItem objects to render
         base_url: Base URL for feedback links
         brief_id: Brief ID for feedback links
+        scan_results: Optional dict with scanner results (Phase 2.5)
 
     Returns:
         Tuple of (subject, html_body, text_body)
@@ -148,6 +338,17 @@ def render_email(
     ]
 
     text_parts = [f"{subject}\n{'=' * len(subject)}\n"]
+
+    # Add scan sections at top (Phase 2.5)
+    if scan_results:
+        scan_html, scan_text = render_scan_sections(scan_results)
+        html_parts.append(scan_html)
+        html_parts.append('<hr style="margin:20px 0;border:none;border-top:2px solid #ddd;">')
+        html_parts.append('<h2 style="font-size:1.2em;margin-bottom:16px;">Deep Dive: Triggered Items</h2>')
+        text_parts.append(scan_text)
+        text_parts.append("\n" + "=" * 50)
+        text_parts.append("DEEP DIVE: Triggered Items")
+        text_parts.append("=" * 50 + "\n")
 
     for item in items:
         r = item.result

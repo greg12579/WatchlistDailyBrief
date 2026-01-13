@@ -34,6 +34,17 @@ class ThresholdsConfig:
     max_items: int = 5
     index_ticker: str = "SPY"
 
+    # Scanner config (Phase 2.5)
+    benchmark_ticker: str = "IWM"  # Small-cap benchmark for scanners
+    tape_top_n: int = 10  # Top N for daily tape (by absolute 1D return)
+    near_high_threshold_pct: float = 3.0  # Within N% of 52w high
+    near_low_threshold_pct: float = 5.0  # Within N% of 52w low
+    broken_252d_return_threshold: float = -20.0  # YoY weakness threshold
+    broken_rel_iwm_252d_threshold: float = -10.0  # Relative weakness vs IWM
+    scan_sections_enabled: list[str] = field(
+        default_factory=lambda: ["tape", "near_highs", "broken"]
+    )
+
 
 @dataclass
 class EmailConfig:

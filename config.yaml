@@ -22,7 +22,7 @@ delivery:
     smtp_port: 587
     from_addr: trades@nantahalapartners.com
     to_addrs:
-      - jon@nantahalapartners.com
+      - greg@nantahalapartners.com
     cc_addrs:
       - greg@nantahalapartners.com
   slack:
